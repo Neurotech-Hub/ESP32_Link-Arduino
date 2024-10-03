@@ -11,6 +11,7 @@
 #endif
 #define RGB_BUILTIN 21
 
+#define NOTIFICATION_WAIT_TIMEOUT 5000  // 5 seconds timeout for notifications
 #define SERVICE_UUID "12345678-1234-1234-1234-123456789abc"
 #define CHARACTERISTIC_UUID_FILELIST "87654321-4321-4321-4321-abcdefabcdf1"      // To receive file list from Pi
 #define CHARACTERISTIC_UUID_FILETRANSFER "87654321-4321-4321-4321-abcdefabcdf2"  // For file data
@@ -104,9 +105,28 @@ void setup() {
 void loop() {
   if (deviceConnected) {
     Serial.println("Device Connected!");
-    //   // Once connected, loop through SD card files and transfer new ones
-    //   File root = SD.open("/");
-    //   transferFiles(root);
+
+    // Wait for notifications to be enabled (with a timeout)
+    unsigned long startTime = millis();
+    while (millis() - startTime < NOTIFICATION_WAIT_TIMEOUT) {
+      // Check if notifications are enabled for the file transfer characteristic
+      if (pFileTransferCharacteristic->getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->getValue()[0] == 1) {
+        Serial.println("Notifications enabled, starting transfer...");
+        delay(200);  // Brief delay to ensure everything is ready before transfer
+
+        // Start the file transfer
+        //   File root = SD.open("/");
+        transferFiles();
+        break;
+      }
+
+      delay(100);  // Check every 100ms to avoid busy-waiting
+    }
+
+    // If the loop finishes and notifications are still not enabled
+    if (millis() - startTime >= NOTIFICATION_WAIT_TIMEOUT) {
+      Serial.println("Timeout: Notifications not enabled.");
+    }
   }
 
   neopixelWrite(RGB_BUILTIN, 0, 0, RGB_BRIGHTNESS);  // Blue
@@ -115,33 +135,74 @@ void loop() {
   delay(200);
 }
 
-// Function to handle file transfer
-void transferFiles(/*File dir*/) {
-  // while (true) {
-  //   File entry = dir.openNextFile();
-  //   if (!entry) break;
+// !! Function to simulate file transfer
+void transferFiles() {
+  // Simulated file names and contents
+  String fakeFiles[] = { "file1.txt", "file2.txt", "file3.txt" };
+  String fileContents[] = {
+    "This is the content of file1.txt.\nLine 2 of file1.txt.\n",
+    "Here is file2.txt data.\nAnother line in file2.txt.\n",
+    "file3.txt contains this text.\nMore text here in file3.txt.\n"
+  };
 
-  //   // Check if the filename is in the fileListOnPi vector
-  //   if (std::find(fileListOnPi.begin(), fileListOnPi.end(), entry.name()) == fileListOnPi.end()) {
-  //     Serial.printf("Transferring file: %s\n", entry.name());
+  // Loop through the simulated files
+  for (int i = 0; i < 3; i++) {
+    Serial.printf("Transferring file: %s\n", fakeFiles[i].c_str());
 
-  //     // Send filename to the Pi
-  //     pFileTransferCharacteristic->setValue(entry.name());
-  //     pFileTransferCharacteristic->notify();
-  //     delay(100);  // Let Pi register filename
+    // Send filename to the Pi
+    pFileTransferCharacteristic->setValue(fakeFiles[i].c_str());
+    pFileTransferCharacteristic->notify();
+    delay(100);  // Let Pi register filename
 
-  //     // Send file contents
-  //     while (entry.available()) {
-  //       String dataLine = entry.readStringUntil('\n');
-  //       pFileTransferCharacteristic->setValue(dataLine.c_str());
-  //       pFileTransferCharacteristic->notify();
-  //       delay(100);  // Adjust delay based on transfer speed
-  //     }
+    // Send file contents line by line
+    String content = fileContents[i];
+    int lineStart = 0;
+    int lineEnd = content.indexOf('\n');
 
-  //     entry.close();
-  //   }
-  // }
+    // Loop through each line of the file content
+    while (lineEnd != -1) {
+      String dataLine = content.substring(lineStart, lineEnd + 1);  // Get the next line
+      pFileTransferCharacteristic->setValue(dataLine.c_str());
+      pFileTransferCharacteristic->notify();
+      delay(100);  // Adjust delay based on transfer speed
+
+      // Move to the next line
+      lineStart = lineEnd + 1;
+      lineEnd = content.indexOf('\n', lineStart);
+    }
+  }
 
   // Optionally disconnect to conserve power after all files are transferred
   // pServer->disconnect(0);
 }
+
+// Function to handle file transfer
+// void transferFiles(/*File dir*/) {
+//   while (true) {
+//     File entry = dir.openNextFile();
+//     if (!entry) break;
+
+//     // Check if the filename is in the fileListOnPi vector
+//     if (std::find(fileListOnPi.begin(), fileListOnPi.end(), entry.name()) == fileListOnPi.end()) {
+//       Serial.printf("Transferring file: %s\n", entry.name());
+
+//       // Send filename to the Pi
+//       pFileTransferCharacteristic->setValue(entry.name());
+//       pFileTransferCharacteristic->notify();
+//       delay(100);  // Let Pi register filename
+
+//       // Send file contents
+//       while (entry.available()) {
+//         String dataLine = entry.readStringUntil('\n');
+//         pFileTransferCharacteristic->setValue(dataLine.c_str());
+//         pFileTransferCharacteristic->notify();
+//         delay(100);  // Adjust delay based on transfer speed
+//       }
+
+//       entry.close();
+//     }
+//   }
+
+//   // Optionally disconnect to conserve power after all files are transferred
+//   pServer->disconnect(0);
+// }

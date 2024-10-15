@@ -1,61 +1,80 @@
-#include "/Users/gaidica/Documents/Arduino/hardware/espressif/esp32/libraries/BLE/src/BLEDevice.h"
+#include "C:\Users\Matt\AppData\Local\Arduino15\packages\esp32\hardware\esp32\3.0.5\libraries\BLE\src\BLEDevice.h"
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
-// #include <SD.h>
-// #include <SPI.h>
+#include <SD.h>
+#include <SPI.h>
 
-#define RGB_BRIGHTNESS 10  // Change white brightness (max 255)
+#define RGB_BRIGHTNESS 10
 #ifdef RGB_BUILTIN
 #undef RGB_BUILTIN
 #endif
 #define RGB_BUILTIN 21
 
-#define NOTIFICATION_WAIT_TIMEOUT 5000  // 5 seconds timeout for notifications
+const int sck = 12;
+const int miso = 13;
+const int mosi = 11;
+const int cs = 10;
+
 #define SERVICE_UUID "12345678-1234-1234-1234-123456789abc"
-#define CHARACTERISTIC_UUID_FILELIST "87654321-4321-4321-4321-abcdefabcdf1"      // To receive file list from Pi
-#define CHARACTERISTIC_UUID_FILETRANSFER "87654321-4321-4321-4321-abcdefabcdf2"  // For file data
-#define SD_CS_PIN 5                                                              // Pin for SD card
+#define CHARACTERISTIC_UUID_READY "87654321-4321-4321-4321-abcdefabcdf5"  // New characteristic for "READY"
+#define CHARACTERISTIC_UUID_FILENAME "87654321-4321-4321-4321-abcdefabcdf3"
+#define CHARACTERISTIC_UUID_FILETRANSFER "87654321-4321-4321-4321-abcdefabcdf2"
+#define CHARACTERISTIC_UUID_NEEDFILE_RESPONSE "87654321-4321-4321-4321-abcdefabcdf4"
 
-BLECharacteristic *pFileListCharacteristic;
+BLECharacteristic *pFilenameCharacteristic;
 BLECharacteristic *pFileTransferCharacteristic;
-BLEServer *pServer;  // Global BLE server object
-bool deviceConnected = false;
-std::vector<String> fileListOnPi;
+BLEServer *pServer;
 
-// File dataFile;  // Commented until SD functionality is needed
+bool piReady = false;
+bool needFile = false;
+bool fileTransferInProgress = false;
+bool allFilesTransferred = false;  // New flag to track if all files have been transferred
+bool deviceConnected = false;
 
 class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer *pServer) {
     deviceConnected = true;
+    allFilesTransferred = false;  // Reset when a new connection is made
     Serial.println("Device connected.");
   }
 
   void onDisconnect(BLEServer *pServer) {
     deviceConnected = false;
+    piReady = false;
+    needFile = false;
+    fileTransferInProgress = false;
     Serial.println("Device disconnected.");
 
-    // Restart advertising after disconnection
-    BLEDevice::getAdvertising()->start();
-    Serial.println("Advertising restarted.");
+    if (!allFilesTransferred) {
+      // Restart advertising only if not all files were transferred
+      BLEDevice::getAdvertising()->start();
+      Serial.println("Advertising restarted.");
+    }
   }
 };
 
-// Callback to handle the file list sent by the Pi
-class FileListCallback : public BLECharacteristicCallbacks {
+// Callback to handle "READY" signal from Pi
+class ReadyCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) {
-    String value = String(pCharacteristic->getValue().c_str());  // Convert std::string to Arduino String
-    if (value.length() > 0) {
-      Serial.print("File list received from Pi: ");
-      Serial.println(value);
+    String value = String(pCharacteristic->getValue().c_str());
+    if (value == "READY") {
+      piReady = true;
+      Serial.println("Pi is ready for file transfer.");
+    }
+  }
+};
 
-      // Parse received file list (assumes filenames are separated by commas)
-      fileListOnPi.clear();
-      char *token = strtok((char *)value.c_str(), ",");
-      while (token != NULL) {
-        fileListOnPi.push_back(String(token));  // Using Arduino String
-        token = strtok(NULL, ",");
-      }
+// Callback to handle "SEND" or "SKIP" from Pi
+class NeedFileCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) {
+    String value = String(pCharacteristic->getValue().c_str());
+    if (value == "SEND") {
+      needFile = true;
+      Serial.println("Pi needs this file.");
+    } else if (value == "SKIP") {
+      needFile = false;
+      Serial.println("Pi does not need this file.");
     }
   }
 };
@@ -66,143 +85,109 @@ void setup() {
   delay(2000);
   Serial.println("Starting ESP32 BLE...");
 
-  // Initialize the SD card
-  // if (!SD.begin(SD_CS_PIN)) {
-  //   Serial.println("SD Card initialization failed!");
-  //   return;
-  // }
-  // Serial.println("SD Card initialized.");
+  SPI.begin(sck, miso, mosi, cs);
+  while (!SD.begin(cs, SPI, 500000)) {
+    Serial.println("SD Card initialization failed!");
+    delay(1000);
+  }
+  Serial.println("SD Card initialized.");
 
-  // Initialize BLE
   BLEDevice::init("ESP32_BLE_SD");
-  pServer = BLEDevice::createServer();  // Assign to global pServer
+  pServer = BLEDevice::createServer();
   pServer->setCallbacks(new ServerCallbacks());
 
-  // Create BLE service
   BLEService *pService = pServer->createService(SERVICE_UUID);
 
-  // Setup characteristic to receive file list from Pi
-  pFileListCharacteristic = pService->createCharacteristic(
-    CHARACTERISTIC_UUID_FILELIST,
+  // Create characteristic for "READY"
+  BLECharacteristic *pReadyCharacteristic = pService->createCharacteristic(
+    CHARACTERISTIC_UUID_READY,
     BLECharacteristic::PROPERTY_WRITE);
-  pFileListCharacteristic->setCallbacks(new FileListCallback());
+  pReadyCharacteristic->setCallbacks(new ReadyCallback());
 
-  // Setup characteristic for file transfer
+  // Create characteristic to send filenames
+  pFilenameCharacteristic = pService->createCharacteristic(
+    CHARACTERISTIC_UUID_FILENAME,
+    BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY);
+
+  // Create characteristic for file transfer data
   pFileTransferCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID_FILETRANSFER,
-    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+    BLECharacteristic::PROPERTY_NOTIFY);
   pFileTransferCharacteristic->addDescriptor(new BLE2902());
 
-  // Start the BLE service
-  pService->start();
+  // Create characteristic to receive file transfer response (SEND/SKIP)
+  BLECharacteristic *pNeedFileResponseCharacteristic = pService->createCharacteristic(
+    CHARACTERISTIC_UUID_NEEDFILE_RESPONSE,
+    BLECharacteristic::PROPERTY_WRITE);
+  pNeedFileResponseCharacteristic->setCallbacks(new NeedFileCallback());
 
-  // Start advertising using legacy BLE advertising
-  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-  pAdvertising->start();
+  pService->start();
+  BLEDevice::getAdvertising()->start();
   Serial.println("BLE advertising started.");
 }
 
 void loop() {
-  if (deviceConnected) {
-    Serial.println("Device Connected!");
+  if (deviceConnected && piReady && !fileTransferInProgress) {
+    neopixelWrite(RGB_BUILTIN, RGB_BRIGHTNESS, 0, 0);  // Red
 
-    // Wait for notifications to be enabled (with a timeout)
-    unsigned long startTime = millis();
-    while (millis() - startTime < NOTIFICATION_WAIT_TIMEOUT) {
-      // Check if notifications are enabled for the file transfer characteristic
-      if (pFileTransferCharacteristic->getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->getValue()[0] == 1) {
-        Serial.println("Notifications enabled, starting transfer...");
-        delay(200);  // Brief delay to ensure everything is ready before transfer
+    File root = SD.open("/");
+    transferFiles(root);  // Process file transfers
+  } else {
+    neopixelWrite(RGB_BUILTIN, 0, 0, RGB_BRIGHTNESS);  // Blue when idle
+  }
+}
 
-        // Start the file transfer
-        //   File root = SD.open("/");
-        transferFiles();
-        break;
+// Function to handle file transfer logic
+void transferFiles(File dir) {
+  while (true) {
+    File entry = dir.openNextFile();
+    if (!entry) {
+      allFilesTransferred = true;  // Mark all files as transferred
+      break;
+    }
+
+    String fileName = entry.name();
+    if (fileName.endsWith(".txt")) {
+      Serial.printf("Sending filename: %s\n", fileName.c_str());
+      pFilenameCharacteristic->setValue(fileName.c_str());
+      pFilenameCharacteristic->notify();
+
+      // Wait for Pi to respond with "SEND" or "SKIP"
+      while (!needFile && deviceConnected) {
+        delay(100);  // Wait until Pi responds
       }
 
-      delay(100);  // Check every 100ms to avoid busy-waiting
-    }
+      if (needFile && deviceConnected) {
+        Serial.printf("Transferring file: %s\n", fileName.c_str());
+        fileTransferInProgress = true;
 
-    // If the loop finishes and notifications are still not enabled
-    if (millis() - startTime >= NOTIFICATION_WAIT_TIMEOUT) {
-      Serial.println("Timeout: Notifications not enabled.");
-    }
-  }
+        // Send file data
+        while (entry.available()) {
+          String dataLine = entry.readStringUntil('\n');
+          pFileTransferCharacteristic->setValue(dataLine.c_str());
+          pFileTransferCharacteristic->notify();
+          delay(100);  // Adjust delay based on transfer speed
+        }
 
-  neopixelWrite(RGB_BUILTIN, 0, 0, RGB_BRIGHTNESS);  // Blue
-  delay(200);                                        // Adjust loop delay as needed
-  neopixelWrite(RGB_BUILTIN, 0, 0, 0);               // Turn off LED
-  delay(200);
-}
+        // After transferring all lines of the file, send the EOF marker
+        pFileTransferCharacteristic->setValue("EOF");
+        pFileTransferCharacteristic->notify();
+        delay(100);  // Small delay to ensure EOF is sent
 
-// !! Function to simulate file transfer
-void transferFiles() {
-  // Simulated file names and contents
-  String fakeFiles[] = { "file1.txt", "file2.txt", "file3.txt" };
-  String fileContents[] = {
-    "This is the content of file1.txt.\nLine 2 of file1.txt.\n",
-    "Here is file2.txt data.\nAnother line in file2.txt.\n",
-    "file3.txt contains this text.\nMore text here in file3.txt.\n"
-  };
+        fileTransferInProgress = false;
+        entry.close();
+      } else {
+        Serial.println("File not needed by Pi.");
+        entry.close();
+      }
 
-  // Loop through the simulated files
-  for (int i = 0; i < 3; i++) {
-    Serial.printf("Transferring file: %s\n", fakeFiles[i].c_str());
-
-    // Send filename to the Pi
-    pFileTransferCharacteristic->setValue(fakeFiles[i].c_str());
-    pFileTransferCharacteristic->notify();
-    delay(100);  // Let Pi register filename
-
-    // Send file contents line by line
-    String content = fileContents[i];
-    int lineStart = 0;
-    int lineEnd = content.indexOf('\n');
-
-    // Loop through each line of the file content
-    while (lineEnd != -1) {
-      String dataLine = content.substring(lineStart, lineEnd + 1);  // Get the next line
-      pFileTransferCharacteristic->setValue(dataLine.c_str());
-      pFileTransferCharacteristic->notify();
-      delay(100);  // Adjust delay based on transfer speed
-
-      // Move to the next line
-      lineStart = lineEnd + 1;
-      lineEnd = content.indexOf('\n', lineStart);
+      // Reset needFile flag for the next file
+      needFile = false;
     }
   }
 
-  // Optionally disconnect to conserve power after all files are transferred
-  // pServer->disconnect(0);
+  if (allFilesTransferred) {
+    Serial.println("All files transferred. Disconnecting...");
+    pServer->disconnect(0);  // Disconnect after all files are transferred
+  }
 }
-
-// Function to handle file transfer
-// void transferFiles(/*File dir*/) {
-//   while (true) {
-//     File entry = dir.openNextFile();
-//     if (!entry) break;
-
-//     // Check if the filename is in the fileListOnPi vector
-//     if (std::find(fileListOnPi.begin(), fileListOnPi.end(), entry.name()) == fileListOnPi.end()) {
-//       Serial.printf("Transferring file: %s\n", entry.name());
-
-//       // Send filename to the Pi
-//       pFileTransferCharacteristic->setValue(entry.name());
-//       pFileTransferCharacteristic->notify();
-//       delay(100);  // Let Pi register filename
-
-//       // Send file contents
-//       while (entry.available()) {
-//         String dataLine = entry.readStringUntil('\n');
-//         pFileTransferCharacteristic->setValue(dataLine.c_str());
-//         pFileTransferCharacteristic->notify();
-//         delay(100);  // Adjust delay based on transfer speed
-//       }
-
-//       entry.close();
-//     }
-//   }
-
-//   // Optionally disconnect to conserve power after all files are transferred
-//   pServer->disconnect(0);
-// }

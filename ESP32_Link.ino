@@ -70,6 +70,7 @@ class FilenameCallback : public BLECharacteristicCallbacks {
 // Initialize BLE and setup the characteristics
 void setup() {
   Serial.begin(115200);
+  delay(2000); // serial port
 
   // Initialize RGB LED
   neopixelWrite(RGB_BUILTIN, 0, 0, RGB_BRIGHTNESS);  // Blue for idle
@@ -78,7 +79,7 @@ void setup() {
   SPI.begin(sck, miso, mosi, cs);
   while (!SD.begin(cs, SPI, 500000)) {
     Serial.println("SD Card initialization failed!");
-    delay(1000);
+    delay(500);
   }
   Serial.println("SD Card initialized.");
 
@@ -122,7 +123,7 @@ void loop() {
     BLEDevice::getAdvertising()->start();
   }
 
-  delay(1000);  // Avoid busy waiting
+  delay(100);  // Avoid busy waiting
 }
 
 // Function to send all filenames to the Pi
@@ -144,7 +145,7 @@ void sendFilenames() {
       String fileInfo = fileName + "|" + String(entry.size());
       pFilenameCharacteristic->setValue(fileInfo.c_str());
       pFilenameCharacteristic->notify();
-      delay(200);  // !!optimize, Delay to prevent overwhelming the Pi
+      delay(50);  // !!optimize, Delay to prevent overwhelming the Pi
     }
   }
   root.close();
@@ -163,7 +164,7 @@ void transferFile(String fileName) {
     String dataLine = file.readStringUntil('\n');
     pFileTransferCharacteristic->setValue(dataLine.c_str());
     pFileTransferCharacteristic->notify();
-    delay(100);  // Small delay between lines
+    delay(50);  // Small delay between lines
   }
 
   // Send EOF marker to signal end of file transfer

@@ -31,7 +31,24 @@ String currentFileName = "";          // Store current file being transferred
 bool allFilesSent = false;            // Flag to track if all filenames have been sent
 String macAddress;                    // MAC address for prepending filenames
 
+String validExtensions[] = { ".txt", ".csv", ".log" };  // Array of valid file extensions
+int numExtensions = sizeof(validExtensions) / sizeof(validExtensions[0]);
 void transferFile(String fileName);
+
+bool isValidFile(String fileName) {
+    String lowerFileName = fileName;
+    lowerFileName.toLowerCase(); // Convert filename to lowercase
+
+    for (int i = 0; i < numExtensions; i++) {
+        String lowerExtension = validExtensions[i];
+        lowerExtension.toLowerCase(); // Convert valid extension to lowercase
+
+        if (lowerFileName.endsWith(lowerExtension)) {
+            return true; // Return true if any valid extension matches
+        }
+    }
+    return false; // Return false if no match found
+}
 
 // BLE Server Callbacks to handle connection and disconnection
 class ServerCallbacks : public BLEServerCallbacks {
@@ -70,7 +87,7 @@ class FilenameCallback : public BLECharacteristicCallbacks {
 // Initialize BLE and setup the characteristics
 void setup() {
   Serial.begin(115200);
-  delay(2000); // serial port
+  delay(2000);  // serial port
 
   // Initialize RGB LED
   neopixelWrite(RGB_BUILTIN, 0, 0, RGB_BRIGHTNESS);  // Blue for idle
@@ -140,7 +157,7 @@ void sendFilenames() {
     }
 
     String fileName = entry.name();
-    if (fileName.endsWith(".txt")) {
+    if (isValidFile(fileName)) {
       Serial.printf("Sending filename and size: %s|%d\n", fileName.c_str(), entry.size());
       String fileInfo = fileName + "|" + String(entry.size());
       pFilenameCharacteristic->setValue(fileInfo.c_str());

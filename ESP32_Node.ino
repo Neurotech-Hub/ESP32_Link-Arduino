@@ -17,43 +17,45 @@ const int mosi = 11;
 const int cs = 10;
 
 #define SERVICE_UUID "12345678-1234-1234-1234-123456789abc"
-#define CHARACTERISTIC_UUID_FILENAME "87654321-4321-4321-4321-abcdefabcdf3"   // R/W/N characteristic for filenames
+#define CHARACTERISTIC_UUID_FILENAME "87654321-4321-4321-4321-abcdefabcdf3"      // R/W/N characteristic for filenames
 #define CHARACTERISTIC_UUID_FILETRANSFER "87654321-4321-4321-4321-abcdefabcdf2"  // R/N characteristic for file transfer
 
 BLECharacteristic *pFilenameCharacteristic;
 BLECharacteristic *pFileTransferCharacteristic;
 BLEServer *pServer;
 
-bool piReadyForFilenames = false;   // Flag to check if Pi has enabled notifications
-bool deviceConnected = false;       // Track connection status
-bool fileTransferInProgress = false; // Track if file transfer is in progress
-String currentFileName = "";        // Store current file being transferred
-bool allFilesSent = false;          // Flag to track if all filenames have been sent
-String macAddress;                  // MAC address for prepending filenames
+bool piReadyForFilenames = false;     // Flag to check if Pi has enabled notifications
+bool deviceConnected = false;         // Track connection status
+bool fileTransferInProgress = false;  // Track if file transfer is in progress
+String currentFileName = "";          // Store current file being transferred
+bool allFilesSent = false;            // Flag to track if all filenames have been sent
+String macAddress;                    // MAC address for prepending filenames
+
+void transferFile(String fileName);
 
 // BLE Server Callbacks to handle connection and disconnection
 class ServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer* pServer) {
+  void onConnect(BLEServer *pServer) {
     deviceConnected = true;
     Serial.println("Device connected.");
     neopixelWrite(RGB_BUILTIN, RGB_BRIGHTNESS, 0, 0);  // Red for active connection
   }
 
-  void onDisconnect(BLEServer* pServer) {
+  void onDisconnect(BLEServer *pServer) {
     deviceConnected = false;
     piReadyForFilenames = false;
     fileTransferInProgress = false;
     allFilesSent = false;
     Serial.println("Device disconnected. Restarting advertising...");
     neopixelWrite(RGB_BUILTIN, 0, 0, RGB_BRIGHTNESS);  // Blue for idle
-    BLEDevice::getAdvertising()->start(); // Restart advertising
+    BLEDevice::getAdvertising()->start();              // Restart advertising
   }
 };
 
 // Callback to handle filename requests from the Pi
 class FilenameCallback : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* pCharacteristic) {
-    std::string rxValue = pCharacteristic->getValue();
+  void onWrite(BLECharacteristic *pCharacteristic) {
+    String rxValue = String(pCharacteristic->getValue().c_str());
     currentFileName = String(rxValue.c_str());
     Serial.printf("Pi requested file: %s\n", currentFileName.c_str());
 
@@ -68,8 +70,6 @@ class FilenameCallback : public BLECharacteristicCallbacks {
 // Initialize BLE and setup the characteristics
 void setup() {
   Serial.begin(115200);
-  macAddress = BLEDevice::getAddress().toString().c_str();
-  macAddress.replace(":", "");
 
   // Initialize RGB LED
   neopixelWrite(RGB_BUILTIN, 0, 0, RGB_BRIGHTNESS);  // Blue for idle
@@ -92,17 +92,15 @@ void setup() {
   // Create the FILENAME characteristic (R/W/N)
   pFilenameCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID_FILENAME,
-    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY
-  );
-  pFilenameCharacteristic->addDescriptor(new BLE2902()); // Enable notifications
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY);
+  pFilenameCharacteristic->addDescriptor(new BLE2902());  // Enable notifications
   pFilenameCharacteristic->setCallbacks(new FilenameCallback());
 
   // Create the FILETRANSFER characteristic (R/N)
   pFileTransferCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID_FILETRANSFER,
-    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
-  );
-  pFileTransferCharacteristic->addDescriptor(new BLE2902()); // Enable notifications
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  pFileTransferCharacteristic->addDescriptor(new BLE2902());  // Enable notifications
 
   // Start the BLE service
   pService->start();
@@ -112,7 +110,9 @@ void setup() {
 
 // Main loop to handle file listing and transfer
 void loop() {
-  if (deviceConnected && !fileTransferInProgress && !allFilesSent) {
+  if (deviceConnected && !fileTransferInProgress && !allFilesSent && pFilenameCharacteristic->getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->getValue()[0] == 1) {
+    Serial.println("Notifications enabled, starting to send filenames...");
+
     // Start sending filenames to the Pi if connected and ready
     sendFilenames();
   }
@@ -122,7 +122,7 @@ void loop() {
     BLEDevice::getAdvertising()->start();
   }
 
-  delay(1000); // Avoid busy waiting
+  delay(1000);  // Avoid busy waiting
 }
 
 // Function to send all filenames to the Pi
@@ -140,18 +140,19 @@ void sendFilenames() {
 
     String fileName = entry.name();
     if (fileName.endsWith(".txt")) {
-      String fullFileName = macAddress + "_" + fileName; // Prepend MAC address
-      Serial.printf("Sending filename: %s\n", fullFileName.c_str());
-      pFilenameCharacteristic->setValue(fullFileName.c_str());
+      Serial.printf("Sending filename and size: %s|%d\n", fileName.c_str(), entry.size());
+      String fileInfo = fileName + "|" + String(entry.size());
+      pFilenameCharacteristic->setValue(fileInfo.c_str());
       pFilenameCharacteristic->notify();
-      delay(500);  // Delay to prevent overwhelming the Pi
+      delay(200);  // !!optimize, Delay to prevent overwhelming the Pi
     }
   }
+  root.close();
 }
 
 // Function to transfer a file line by line over FILETRANSFER characteristic
 void transferFile(String fileName) {
-  File file = SD.open(fileName);
+  File file = SD.open("/" + fileName);
   if (!file) {
     Serial.printf("Failed to open file: %s\n", fileName.c_str());
     return;

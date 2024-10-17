@@ -20,7 +20,7 @@ const int cs = 10;
 #define CHARACTERISTIC_UUID_FILENAME "87654321-4321-4321-4321-abcdefabcdf3"      // R/W/I characteristic for filenames
 #define CHARACTERISTIC_UUID_FILETRANSFER "87654321-4321-4321-4321-abcdefabcdf2"  // R/I characteristic for file transfer
 uint16_t mtuSize = 20;  // Default MTU size, updated after negotiation
-#define NOTIFICATION_DELAY 1  // ms
+#define NOTIFICATION_DELAY 10  // ms
 
 BLECharacteristic *pFilenameCharacteristic;
 BLECharacteristic *pFileTransferCharacteristic;

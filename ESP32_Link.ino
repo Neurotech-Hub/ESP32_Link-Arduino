@@ -56,6 +56,10 @@ class ServerCallbacks : public BLEServerCallbacks {
     deviceConnected = true;
     Serial.println("Device connected.");
     neopixelWrite(RGB_BUILTIN, RGB_BRIGHTNESS, 0, 0);  // Red for active connection
+
+    // Request to increase the MTU size
+    pServer->updateConnParams(0, 0x20, 0x20, 400);  // Optional, update connection parameters for a better response
+    pServer->getPeerDevice()->requestMtu(512);  // Maximum MTU size
   }
 
   void onDisconnect(BLEServer *pServer) {
@@ -66,6 +70,13 @@ class ServerCallbacks : public BLEServerCallbacks {
     Serial.println("Device disconnected. Restarting advertising...");
     neopixelWrite(RGB_BUILTIN, 0, 0, RGB_BRIGHTNESS);  // Blue for idle
     BLEDevice::getAdvertising()->start();              // Restart advertising
+  }
+};
+
+// Callback to handle MTU size negotiation
+class MTUCallback : public BLEServerCallbacks {
+  void onMtuChanged(BLEServer *pServer, esp_ble_gatts_cb_param_t *param) {
+    Serial.printf("MTU size updated to: %d\n", param->mtu);
   }
 };
 
@@ -168,7 +179,7 @@ void sendFilenames() {
   root.close();
 }
 
-// Function to transfer a file line by line over FILETRANSFER characteristic
+// Function to transfer a file byte by byte over FILETRANSFER characteristic
 void transferFile(String fileName) {
   File file = SD.open("/" + fileName);
   if (!file) {
@@ -177,11 +188,13 @@ void transferFile(String fileName) {
   }
 
   Serial.printf("Transferring file: %s\n", fileName.c_str());
+  int mtuSize = pServer->getPeerDevice()->getMtu() - 3;  // Get the current MTU size and subtract 3 for ATT overhead
+  uint8_t buffer[mtuSize];
   while (file.available()) {
-    String dataLine = file.readStringUntil('\n');
-    pFileTransferCharacteristic->setValue(dataLine.c_str());
+    int bytesRead = file.read(buffer, sizeof(buffer));
+    pFileTransferCharacteristic->setValue(buffer, bytesRead);
     pFileTransferCharacteristic->notify();
-    delay(50);  // Small delay between lines
+    delay(10);  // Small delay to prevent overwhelming the BLE connection
   }
 
   // Send EOF marker to signal end of file transfer

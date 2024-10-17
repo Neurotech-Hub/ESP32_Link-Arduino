@@ -19,7 +19,7 @@ const int cs = 10;
 #define SERVICE_UUID "12345678-1234-1234-1234-123456789abc"
 #define CHARACTERISTIC_UUID_FILENAME "87654321-4321-4321-4321-abcdefabcdf3"      // R/W/I characteristic for filenames
 #define CHARACTERISTIC_UUID_FILETRANSFER "87654321-4321-4321-4321-abcdefabcdf2"  // R/I characteristic for file transfer
-#define MTU_SIZE 20
+uint16_t mtuSize = 20;  // Default MTU size, updated after negotiation
 #define NOTIFICATION_DELAY 20  // ms
 
 BLECharacteristic *pFilenameCharacteristic;
@@ -41,7 +41,10 @@ class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer *pServer) {
     deviceConnected = true;
     neopixelWrite(RGB_BUILTIN, RGB_BRIGHTNESS, 0, 0);  // Red for active connection
-    Serial.print("Device connected");
+    Serial.println("Device connected");
+    // Request a larger MTU after connection
+    BLEDevice::setMTU(512);
+    mtuSize = BLEDevice::getMTU();
   }
 
   void onDisconnect(BLEServer *pServer) {
@@ -86,6 +89,8 @@ bool isValidFile(String fileName) {
 
 // Initialize BLE and setup the characteristics
 void setup() {
+  // Request to increase MTU size
+  BLEDevice::setMTU(512);
   Serial.begin(115200);
   delay(2000);  // serial port
 
@@ -165,20 +170,20 @@ void sendFilenames() {
       Serial.printf("Sending filename and size: %s|%d\n", fileName.c_str(), entry.size());
       String fileInfo = fileName + "|" + String(entry.size());
 
-      // Split fileInfo into chunks if it exceeds MTU_SIZE
+      // Split fileInfo into chunks if it exceeds mtuSize
       int index = 0;
       while (index < fileInfo.length()) {
-        String chunk = fileInfo.substring(index, index + MTU_SIZE);
+        String chunk = fileInfo.substring(index, index + mtuSize);
         pFilenameCharacteristic->setValue(chunk.c_str());
         pFilenameCharacteristic->notify();
-        index += MTU_SIZE;
-        delay(20);  // Small delay to prevent overwhelming the BLE connection
+        index += mtuSize;
+        delay(NOTIFICATION_DELAY);
       }
 
       // Send end of name marker
       pFilenameCharacteristic->setValue("EON");  // Signal end of name
       pFilenameCharacteristic->notify();
-      delay(20);  // Small delay to prevent overwhelming the BLE connection
+      delay(NOTIFICATION_DELAY);
     }
   }
   root.close();
@@ -192,26 +197,24 @@ void transferFile(String fileName) {
     return;
   }
 
-  Serial.printf("Transferring %s (MTU=%i)\n", fileName.c_str(), MTU_SIZE);
-  uint8_t buffer[MTU_SIZE];
+  Serial.printf("Transferring %s (MTU=%i)\n", fileName.c_str(), mtuSize);
+  uint8_t buffer[mtuSize];
 
   while (file.available()) {
-    int bytesRead = file.read(buffer, MTU_SIZE);
+    int bytesRead = file.read(buffer, mtuSize);
     if (bytesRead > 0) {
       pFileTransferCharacteristic->setValue(buffer, bytesRead);
       pFileTransferCharacteristic->notify();
-      delay(NOTIFICATION_DELAY);  // Small delay to prevent overwhelming the BLE connection
+      delay(NOTIFICATION_DELAY);
     } else {
       Serial.println("Error reading from file.");
       break;
     }
   }
 
-  Serial.println("Sending EOF...");
   // Send EOF marker to signal end of file transfer
   pFileTransferCharacteristic->setValue("EOF");
   pFileTransferCharacteristic->notify();
-  Serial.println("Sent EOF.");
 
   file.close();
   Serial.println("File transfer complete.");

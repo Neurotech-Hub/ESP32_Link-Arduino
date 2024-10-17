@@ -16,11 +16,11 @@ const int miso = 13;
 const int mosi = 11;
 const int cs = 10;
 
-#define SERVICE_UUID "12345678-1234-1234-1234-123456789abc"
-#define CHARACTERISTIC_UUID_FILENAME "87654321-4321-4321-4321-abcdefabcdf3"      // R/W/I characteristic for filenames
-#define CHARACTERISTIC_UUID_FILETRANSFER "87654321-4321-4321-4321-abcdefabcdf2"  // R/I characteristic for file transfer
-uint16_t mtuSize = 20;  // Default MTU size, updated after negotiation
-#define NOTIFICATION_DELAY 10  // ms
+#define SERVICE_UUID "57617368-5501-0001-8000-00805f9b34fb"
+#define CHARACTERISTIC_UUID_FILENAME "57617368-5502-0001-8000-00805f9b34fb"
+#define CHARACTERISTIC_UUID_FILETRANSFER "57617368-5503-0001-8000-00805f9b34fb"
+uint16_t mtuSize = 20;        // Default MTU size, updated after negotiation
+#define NOTIFICATION_DELAY 0  // ms
 
 BLECharacteristic *pFilenameCharacteristic;
 BLECharacteristic *pFileTransferCharacteristic;
@@ -99,7 +99,7 @@ void setup() {
 
   // Initialize SPI and SD card
   SPI.begin(sck, miso, mosi, cs);
-  while (!SD.begin(cs, SPI, 500000)) {
+  while (!SD.begin(cs, SPI, 1000000)) {
     Serial.println("SD Card initialization failed!");
     delay(500);
   }
@@ -111,19 +111,26 @@ void setup() {
   pServer->setCallbacks(new ServerCallbacks());
 
   BLEService *pService = pServer->createService(SERVICE_UUID);
+  BLE2902 *serviceNameDescriptor = new BLE2902();
 
   // Create the FILENAME characteristic (R/W/I)
   pFilenameCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID_FILENAME,
-    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY);
-  pFilenameCharacteristic->addDescriptor(new BLE2902());  // Enable notifications
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_INDICATE);
+  BLE2902 *filenameDescriptor = new BLE2902();
+  filenameDescriptor->setValue("Filename Characteristic");
+  pFilenameCharacteristic->addDescriptor(filenameDescriptor);
+  pFilenameCharacteristic->addDescriptor(new BLE2902());  // Enable indications
   pFilenameCharacteristic->setCallbacks(new FilenameCallback());
 
   // Create the FILETRANSFER characteristic (R/I)
   pFileTransferCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID_FILETRANSFER,
-    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-  pFileTransferCharacteristic->addDescriptor(new BLE2902());  // Enable notifications
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_INDICATE);
+  BLE2902 *fileTransferDescriptor = new BLE2902();
+  fileTransferDescriptor->setValue("File Transfer Characteristic");
+  pFileTransferCharacteristic->addDescriptor(fileTransferDescriptor);
+  pFileTransferCharacteristic->addDescriptor(new BLE2902());  // Enable indications
 
   // Start the BLE service
   pService->start();
@@ -139,8 +146,9 @@ void loop() {
     fileTransferInProgress = false;
   }
 
-  if (deviceConnected && !fileTransferInProgress && !allFilesSent && pFilenameCharacteristic->getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->getValue()[0] == 1) {
-    Serial.println("Notifications enabled, send filenames...");
+  // value=1 for notifications, =2 for indications
+  if (deviceConnected && !fileTransferInProgress && !allFilesSent && pFilenameCharacteristic->getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->getValue()[0] > 0) {
+    Serial.println("Central is listening, send filenames...");
     sendFilenames();
   }
 
@@ -160,7 +168,7 @@ void sendFilenames() {
     if (!entry) {
       Serial.println("All filenames sent.");
       pFilenameCharacteristic->setValue("EOF");  // Signal end of filenames
-      pFilenameCharacteristic->notify();
+      pFilenameCharacteristic->indicate();
       allFilesSent = true;
       break;
     }
@@ -175,15 +183,15 @@ void sendFilenames() {
       while (index < fileInfo.length()) {
         String chunk = fileInfo.substring(index, index + mtuSize);
         pFilenameCharacteristic->setValue(chunk.c_str());
-        pFilenameCharacteristic->notify();
+        pFilenameCharacteristic->indicate();
         index += mtuSize;
-        delay(NOTIFICATION_DELAY);
+        // delay(NOTIFICATION_DELAY);
       }
 
       // Send end of name marker
       pFilenameCharacteristic->setValue("EON");  // Signal end of name
-      pFilenameCharacteristic->notify();
-      delay(NOTIFICATION_DELAY);
+      pFilenameCharacteristic->indicate();
+      // delay(NOTIFICATION_DELAY);
     }
   }
   root.close();
@@ -204,8 +212,8 @@ void transferFile(String fileName) {
     int bytesRead = file.read(buffer, mtuSize);
     if (bytesRead > 0) {
       pFileTransferCharacteristic->setValue(buffer, bytesRead);
-      pFileTransferCharacteristic->notify();
-      delay(NOTIFICATION_DELAY);
+      pFileTransferCharacteristic->indicate();
+      // delay(NOTIFICATION_DELAY);
     } else {
       Serial.println("Error reading from file.");
       break;
@@ -214,7 +222,7 @@ void transferFile(String fileName) {
 
   // Send EOF marker to signal end of file transfer
   pFileTransferCharacteristic->setValue("EOF");
-  pFileTransferCharacteristic->notify();
+  pFileTransferCharacteristic->indicate();
 
   file.close();
   Serial.println("File transfer complete.");

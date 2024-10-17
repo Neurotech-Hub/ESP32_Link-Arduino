@@ -1,8 +1,8 @@
-### Interacting with the ESP32 BLE File Transfer Device
+# NullLink Node Device (ESP32)
 
 This document describes the proper way to interact with the ESP32-based BLE device to list files and receive file contents via BLE indications.
 
-#### Overview
+## Overview
 The device uses BLE to transfer files stored on an SD card. It provides two main characteristics to interact with:
 1. **Filename Characteristic** (`57617368-5502-0001-8000-00805f9b34fb`): Used to list available filenames and request specific file transfers.
 2. **File Transfer Characteristic** (`57617368-5503-0001-8000-00805f9b34fb`): Used to receive the actual file data.

@@ -17,8 +17,10 @@ const int mosi = 11;
 const int cs = 10;
 
 #define SERVICE_UUID "12345678-1234-1234-1234-123456789abc"
-#define CHARACTERISTIC_UUID_FILENAME "87654321-4321-4321-4321-abcdefabcdf3"      // R/W/N characteristic for filenames
-#define CHARACTERISTIC_UUID_FILETRANSFER "87654321-4321-4321-4321-abcdefabcdf2"  // R/N characteristic for file transfer
+#define CHARACTERISTIC_UUID_FILENAME "87654321-4321-4321-4321-abcdefabcdf3"      // R/W/I characteristic for filenames
+#define CHARACTERISTIC_UUID_FILETRANSFER "87654321-4321-4321-4321-abcdefabcdf2"  // R/I characteristic for file transfer
+#define MTU_SIZE 20
+#define NOTIFICATION_DELAY 20  // ms
 
 BLECharacteristic *pFilenameCharacteristic;
 BLECharacteristic *pFileTransferCharacteristic;
@@ -33,33 +35,13 @@ String macAddress;                    // MAC address for prepending filenames
 
 String validExtensions[] = { ".txt", ".csv", ".log" };  // Array of valid file extensions
 int numExtensions = sizeof(validExtensions) / sizeof(validExtensions[0]);
-void transferFile(String fileName);
-
-bool isValidFile(String fileName) {
-    String lowerFileName = fileName;
-    lowerFileName.toLowerCase(); // Convert filename to lowercase
-
-    for (int i = 0; i < numExtensions; i++) {
-        String lowerExtension = validExtensions[i];
-        lowerExtension.toLowerCase(); // Convert valid extension to lowercase
-
-        if (lowerFileName.endsWith(lowerExtension)) {
-            return true; // Return true if any valid extension matches
-        }
-    }
-    return false; // Return false if no match found
-}
 
 // BLE Server Callbacks to handle connection and disconnection
 class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer *pServer) {
     deviceConnected = true;
-    Serial.println("Device connected.");
     neopixelWrite(RGB_BUILTIN, RGB_BRIGHTNESS, 0, 0);  // Red for active connection
-
-    // Request to increase the MTU size
-    pServer->updateConnParams(0, 0x20, 0x20, 400);  // Optional, update connection parameters for a better response
-    pServer->getPeerDevice()->requestMtu(512);  // Maximum MTU size
+    Serial.print("Device connected");
   }
 
   void onDisconnect(BLEServer *pServer) {
@@ -73,27 +55,34 @@ class ServerCallbacks : public BLEServerCallbacks {
   }
 };
 
-// Callback to handle MTU size negotiation
-class MTUCallback : public BLEServerCallbacks {
-  void onMtuChanged(BLEServer *pServer, esp_ble_gatts_cb_param_t *param) {
-    Serial.printf("MTU size updated to: %d\n", param->mtu);
-  }
-};
-
 // Callback to handle filename requests from the Pi
 class FilenameCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) {
     String rxValue = String(pCharacteristic->getValue().c_str());
     currentFileName = String(rxValue.c_str());
-    Serial.printf("Pi requested file: %s\n", currentFileName.c_str());
+    Serial.printf("Requested file: %s\n", currentFileName.c_str());
 
-    // Start the file transfer if a valid filename is received
+    // Set flag to start the file transfer in the main loop
     if (currentFileName != "") {
       fileTransferInProgress = true;
-      transferFile(currentFileName);
     }
   }
 };
+
+bool isValidFile(String fileName) {
+  String lowerFileName = fileName;
+  lowerFileName.toLowerCase();  // Convert filename to lowercase
+
+  for (int i = 0; i < numExtensions; i++) {
+    String lowerExtension = validExtensions[i];
+    lowerExtension.toLowerCase();  // Convert valid extension to lowercase
+
+    if (lowerFileName.endsWith(lowerExtension)) {
+      return true;  // Return true if any valid extension matches
+    }
+  }
+  return false;  // Return false if no match found
+}
 
 // Initialize BLE and setup the characteristics
 void setup() {
@@ -118,14 +107,14 @@ void setup() {
 
   BLEService *pService = pServer->createService(SERVICE_UUID);
 
-  // Create the FILENAME characteristic (R/W/N)
+  // Create the FILENAME characteristic (R/W/I)
   pFilenameCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID_FILENAME,
     BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY);
   pFilenameCharacteristic->addDescriptor(new BLE2902());  // Enable notifications
   pFilenameCharacteristic->setCallbacks(new FilenameCallback());
 
-  // Create the FILETRANSFER characteristic (R/N)
+  // Create the FILETRANSFER characteristic (R/I)
   pFileTransferCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID_FILETRANSFER,
     BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
@@ -139,10 +128,14 @@ void setup() {
 
 // Main loop to handle file listing and transfer
 void loop() {
-  if (deviceConnected && !fileTransferInProgress && !allFilesSent && pFilenameCharacteristic->getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->getValue()[0] == 1) {
-    Serial.println("Notifications enabled, starting to send filenames...");
+  if (deviceConnected && fileTransferInProgress && currentFileName != "") {
+    transferFile(currentFileName);
+    currentFileName = "";
+    fileTransferInProgress = false;
+  }
 
-    // Start sending filenames to the Pi if connected and ready
+  if (deviceConnected && !fileTransferInProgress && !allFilesSent && pFilenameCharacteristic->getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->getValue()[0] == 1) {
+    Serial.println("Notifications enabled, send filenames...");
     sendFilenames();
   }
 
@@ -161,9 +154,9 @@ void sendFilenames() {
     File entry = root.openNextFile();
     if (!entry) {
       Serial.println("All filenames sent.");
-      allFilesSent = true;
       pFilenameCharacteristic->setValue("EOF");  // Signal end of filenames
       pFilenameCharacteristic->notify();
+      allFilesSent = true;
       break;
     }
 
@@ -171,9 +164,21 @@ void sendFilenames() {
     if (isValidFile(fileName)) {
       Serial.printf("Sending filename and size: %s|%d\n", fileName.c_str(), entry.size());
       String fileInfo = fileName + "|" + String(entry.size());
-      pFilenameCharacteristic->setValue(fileInfo.c_str());
+
+      // Split fileInfo into chunks if it exceeds MTU_SIZE
+      int index = 0;
+      while (index < fileInfo.length()) {
+        String chunk = fileInfo.substring(index, index + MTU_SIZE);
+        pFilenameCharacteristic->setValue(chunk.c_str());
+        pFilenameCharacteristic->notify();
+        index += MTU_SIZE;
+        delay(20);  // Small delay to prevent overwhelming the BLE connection
+      }
+
+      // Send end of name marker
+      pFilenameCharacteristic->setValue("EON");  // Signal end of name
       pFilenameCharacteristic->notify();
-      delay(50);  // !!optimize, Delay to prevent overwhelming the Pi
+      delay(20);  // Small delay to prevent overwhelming the BLE connection
     }
   }
   root.close();
@@ -187,20 +192,27 @@ void transferFile(String fileName) {
     return;
   }
 
-  Serial.printf("Transferring file: %s\n", fileName.c_str());
-  int mtuSize = pServer->getPeerDevice()->getMtu() - 3;  // Get the current MTU size and subtract 3 for ATT overhead
-  uint8_t buffer[mtuSize];
+  Serial.printf("Transferring %s (MTU=%i)\n", fileName.c_str(), MTU_SIZE);
+  uint8_t buffer[MTU_SIZE];
+
   while (file.available()) {
-    int bytesRead = file.read(buffer, sizeof(buffer));
-    pFileTransferCharacteristic->setValue(buffer, bytesRead);
-    pFileTransferCharacteristic->notify();
-    delay(10);  // Small delay to prevent overwhelming the BLE connection
+    int bytesRead = file.read(buffer, MTU_SIZE);
+    if (bytesRead > 0) {
+      pFileTransferCharacteristic->setValue(buffer, bytesRead);
+      pFileTransferCharacteristic->notify();
+      delay(NOTIFICATION_DELAY);  // Small delay to prevent overwhelming the BLE connection
+    } else {
+      Serial.println("Error reading from file.");
+      break;
+    }
   }
 
+  Serial.println("Sending EOF...");
   // Send EOF marker to signal end of file transfer
   pFileTransferCharacteristic->setValue("EOF");
   pFileTransferCharacteristic->notify();
+  Serial.println("Sent EOF.");
+
   file.close();
   Serial.println("File transfer complete.");
-  fileTransferInProgress = false;
 }

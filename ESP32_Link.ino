@@ -21,10 +21,12 @@ const int cs = 10;
 #define CHARACTERISTIC_UUID_FILETRANSFER "57617368-5503-0001-8000-00805f9b34fb"
 uint16_t mtuSize = 20;        // Default MTU size, updated after negotiation
 #define NOTIFICATION_DELAY 0  // ms
+#define WATCHDOG_TIMEOUT_MS 10000  // 10 seconds timeout
 
 BLECharacteristic *pFilenameCharacteristic;
 BLECharacteristic *pFileTransferCharacteristic;
 BLEServer *pServer;
+uint16_t connectionID = 0;
 
 bool piReadyForFilenames = false;     // Flag to check if Pi has enabled notifications
 bool deviceConnected = false;         // Track connection status
@@ -32,13 +34,31 @@ bool fileTransferInProgress = false;  // Track if file transfer is in progress
 String currentFileName = "";          // Store current file being transferred
 bool allFilesSent = false;            // Flag to track if all filenames have been sent
 String macAddress;                    // MAC address for prepending filenames
+unsigned long watchdogTimer = 0;        // Watchdog timer to track connection activity
 
-String validExtensions[] = { ".txt", ".csv", ".log" };  // Array of valid file extensions
+// Array of valid file extensions; potentially reduces data transfer
+String validExtensions[] = { ".txt", ".csv", ".log" };
 int numExtensions = sizeof(validExtensions) / sizeof(validExtensions[0]);
 
-// BLE Server Callbacks to handle connection and disconnection
+// Function to handle disconnection and reset the state
+void handleDisconnection(bool forceDisconnect = false) {
+  if (forceDisconnect && deviceConnected) {
+    pServer->disconnect(connectionID);  // Forcefully disconnect the client
+  }
+  deviceConnected = false;
+  piReadyForFilenames = false;
+  fileTransferInProgress = false;
+  allFilesSent = false;
+  Serial.println("Device disconnected. Restarting advertising...");
+  neopixelWrite(RGB_BUILTIN, 0, 0, RGB_BRIGHTNESS);  // Blue for idle
+  BLEDevice::getAdvertising()->start();              // Restart advertising
+}
+
+// BLE Server Callbacks to handle connection and disconnection, never use blocking calls
 class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer *pServer) {
+    connectionID = pServer->getConnId();
+    watchdogTimer = millis();  // Initialize watchdog timer on connection
     deviceConnected = true;
     neopixelWrite(RGB_BUILTIN, RGB_BRIGHTNESS, 0, 0);  // Red for active connection
     Serial.println("Device connected");
@@ -48,13 +68,7 @@ class ServerCallbacks : public BLEServerCallbacks {
   }
 
   void onDisconnect(BLEServer *pServer) {
-    deviceConnected = false;
-    piReadyForFilenames = false;
-    fileTransferInProgress = false;
-    allFilesSent = false;
-    Serial.println("Device disconnected. Restarting advertising...");
-    neopixelWrite(RGB_BUILTIN, 0, 0, RGB_BRIGHTNESS);  // Blue for idle
-    BLEDevice::getAdvertising()->start();              // Restart advertising
+    handleDisconnection();
   }
 };
 
@@ -90,7 +104,6 @@ bool isValidFile(String fileName) {
 // Initialize BLE and setup the characteristics
 void setup() {
   // Request to increase MTU size
-  BLEDevice::setMTU(512);
   Serial.begin(115200);
   delay(2000);  // serial port
 
@@ -117,9 +130,6 @@ void setup() {
   pFilenameCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID_FILENAME,
     BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_INDICATE);
-  BLE2902 *filenameDescriptor = new BLE2902();
-  filenameDescriptor->setValue("Filename Characteristic");
-  pFilenameCharacteristic->addDescriptor(filenameDescriptor);
   pFilenameCharacteristic->addDescriptor(new BLE2902());  // Enable indications
   pFilenameCharacteristic->setCallbacks(new FilenameCallback());
 
@@ -127,9 +137,6 @@ void setup() {
   pFileTransferCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID_FILETRANSFER,
     BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_INDICATE);
-  BLE2902 *fileTransferDescriptor = new BLE2902();
-  fileTransferDescriptor->setValue("File Transfer Characteristic");
-  pFileTransferCharacteristic->addDescriptor(fileTransferDescriptor);
   pFileTransferCharacteristic->addDescriptor(new BLE2902());  // Enable indications
 
   // Start the BLE service
@@ -140,6 +147,17 @@ void setup() {
 
 // Main loop to handle file listing and transfer
 void loop() {
+  // Check if watchdog timer has exceeded the timeout
+  if (deviceConnected && (millis() - watchdogTimer > WATCHDOG_TIMEOUT_MS)) {
+    Serial.println("Watchdog timeout detected, disconnecting...");
+    handleDisconnection(true);
+  }
+  // Manually check if the device is still connected
+  if (deviceConnected && pServer->getConnectedCount() == 0) {
+    Serial.println("Manual disconnect detected.");
+    handleDisconnection();
+  }
+
   if (deviceConnected && fileTransferInProgress && currentFileName != "") {
     transferFile(currentFileName);
     currentFileName = "";
@@ -152,18 +170,14 @@ void loop() {
     sendFilenames();
   }
 
-  // If no device is connected, restart advertising
-  if (!deviceConnected) {
-    BLEDevice::getAdvertising()->start();
-  }
-
   delay(100);  // Avoid busy waiting
 }
 
 // Function to send all filenames to the Pi
 void sendFilenames() {
   File root = SD.open("/");
-  while (true) {
+  while (deviceConnected) {
+    watchdogTimer = millis();  // Reset watchdog timer for activity
     File entry = root.openNextFile();
     if (!entry) {
       Serial.println("All filenames sent.");
@@ -180,7 +194,8 @@ void sendFilenames() {
 
       // Split fileInfo into chunks if it exceeds mtuSize
       int index = 0;
-      while (index < fileInfo.length()) {
+      while (index < fileInfo.length() && deviceConnected) {
+        watchdogTimer = millis();  // Reset watchdog timer for activity
         String chunk = fileInfo.substring(index, index + mtuSize);
         pFilenameCharacteristic->setValue(chunk.c_str());
         pFilenameCharacteristic->indicate();
@@ -208,7 +223,8 @@ void transferFile(String fileName) {
   Serial.printf("Transferring %s (MTU=%i)\n", fileName.c_str(), mtuSize);
   uint8_t buffer[mtuSize];
 
-  while (file.available()) {
+  while (file.available() && deviceConnected) {
+    watchdogTimer = millis();  // Reset watchdog timer for activity
     int bytesRead = file.read(buffer, mtuSize);
     if (bytesRead > 0) {
       pFileTransferCharacteristic->setValue(buffer, bytesRead);

@@ -19,9 +19,9 @@ const int cs = 10;
 #define SERVICE_UUID "57617368-5501-0001-8000-00805f9b34fb"
 #define CHARACTERISTIC_UUID_FILENAME "57617368-5502-0001-8000-00805f9b34fb"
 #define CHARACTERISTIC_UUID_FILETRANSFER "57617368-5503-0001-8000-00805f9b34fb"
-uint16_t mtuSize = 20;        // Default MTU size, updated after negotiation
-#define NOTIFICATION_DELAY 0  // ms
-#define WATCHDOG_TIMEOUT_MS 10000  // 10 seconds timeout
+uint16_t mtuSize = 20;             // Default MTU size, updated after negotiation
+#define NOTIFICATION_DELAY 0       // ms
+#define WATCHDOG_TIMEOUT_MS 5000  // 10 seconds timeout
 
 BLECharacteristic *pFilenameCharacteristic;
 BLECharacteristic *pFileTransferCharacteristic;
@@ -34,25 +34,11 @@ bool fileTransferInProgress = false;  // Track if file transfer is in progress
 String currentFileName = "";          // Store current file being transferred
 bool allFilesSent = false;            // Flag to track if all filenames have been sent
 String macAddress;                    // MAC address for prepending filenames
-unsigned long watchdogTimer = 0;        // Watchdog timer to track connection activity
+unsigned long watchdogTimer = 0;      // Watchdog timer to track connection activity
 
 // Array of valid file extensions; potentially reduces data transfer
 String validExtensions[] = { ".txt", ".csv", ".log" };
 int numExtensions = sizeof(validExtensions) / sizeof(validExtensions[0]);
-
-// Function to handle disconnection and reset the state
-void handleDisconnection(bool forceDisconnect = false) {
-  if (forceDisconnect && deviceConnected) {
-    pServer->disconnect(connectionID);  // Forcefully disconnect the client
-  }
-  deviceConnected = false;
-  piReadyForFilenames = false;
-  fileTransferInProgress = false;
-  allFilesSent = false;
-  Serial.println("Device disconnected. Restarting advertising...");
-  neopixelWrite(RGB_BUILTIN, 0, 0, RGB_BRIGHTNESS);  // Blue for idle
-  BLEDevice::getAdvertising()->start();              // Restart advertising
-}
 
 // BLE Server Callbacks to handle connection and disconnection, never use blocking calls
 class ServerCallbacks : public BLEServerCallbacks {
@@ -68,7 +54,13 @@ class ServerCallbacks : public BLEServerCallbacks {
   }
 
   void onDisconnect(BLEServer *pServer) {
-    handleDisconnection();
+    deviceConnected = false;
+    piReadyForFilenames = false;
+    fileTransferInProgress = false;
+    allFilesSent = false;
+    Serial.println("Device disconnected. Restarting advertising...");
+    neopixelWrite(RGB_BUILTIN, 0, 0, RGB_BRIGHTNESS);  // Blue for idle
+    BLEDevice::getAdvertising()->start();              // Restart advertising
   }
 };
 
@@ -150,12 +142,7 @@ void loop() {
   // Check if watchdog timer has exceeded the timeout
   if (deviceConnected && (millis() - watchdogTimer > WATCHDOG_TIMEOUT_MS)) {
     Serial.println("Watchdog timeout detected, disconnecting...");
-    handleDisconnection(true);
-  }
-  // Manually check if the device is still connected
-  if (deviceConnected && pServer->getConnectedCount() == 0) {
-    Serial.println("Manual disconnect detected.");
-    handleDisconnection();
+    pServer->disconnect(connectionID);  // will cue handleDisconnection() from callback
   }
 
   if (deviceConnected && fileTransferInProgress && currentFileName != "") {
